@@ -4,7 +4,6 @@ import threading
 import select
 import re
 import os
-import sys
 import subprocess
 import time
 from binascii import hexlify, unhexlify
@@ -55,7 +54,13 @@ class RDPProxy(threading.Thread):
                 self.forward_data()
             except (ssl.SSLError, ssl.SSLEOFError) as e:
                 print("SSLError: %s" % str(e))
-            except (ConnectionResetError, OSError, ValueError) as e:
+            except ValueError:
+                print("Something went wrong during the SSL handshake. "
+                      "Make sure that /etc/ssl/openssl.cnf contains this "
+                      "line in the section [system_default_sect]:")
+                print("    MinProtocol = TLSv1.0")
+                os._exit(1)
+            except (ConnectionResetError, OSError) as e:
                 print("Connection lost (%s)" % str(e))
                 if "creds" in self.vars:
                     stop_attack()
@@ -143,13 +148,25 @@ class RDPProxy(threading.Thread):
 
 
     def enableSSL(self):
+        global SNI
+        SNI = ""
+        def sni_callback(s, hostname, ctx):
+            global SNI
+            SNI = hostname
+            return None
         print("Enable SSL")
         try:
             sslversion = get_ssl_version(self.lsock)
-            ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            ctx = ssl.SSLContext(sslversion)
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             ctx.load_cert_chain(args.certfile, keyfile=args.keyfile, password=None)
+            try:
+                ctx.sni_callback = sni_callback
+            except AttributeError:
+                # This requires python3.7 or higher. But the feature is not
+                # that important anyway, so let's just continue.
+                pass
             self.lsock = ctx.wrap_socket(
                 self.lsock,
                 server_side=True,
@@ -161,12 +178,14 @@ class RDPProxy(threading.Thread):
                     ctx.set_ciphers("RC4-SHA")
                     self.rsock = ctx.wrap_socket(
                         self.rsock,
+                        server_hostname=SNI,
                         do_handshake_on_connect=True,
                     )
-                except ssl.SSLError:
+                except ssl.SSLError as e:
                     print("Not using RC4-SHA because of SSL Error:", str(e))
                     self.rsock = ctx.wrap_socket(
                         self.rsock,
+                        server_hostname=SNI,
                         do_handshake_on_connect=True,
                     )
                 except ConnectionResetError as e:
@@ -175,6 +194,7 @@ class RDPProxy(threading.Thread):
             else:
                 self.rsock = ctx.wrap_socket(
                     self.rsock,
+                    server_hostname=SNI,
                     do_handshake_on_connect=True,
                 )
         except ConnectionResetError as e:
